@@ -42,8 +42,8 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
   const [validationError, setValidationError] = useState<string | null>(null)
 
   const autosaveTimer = useRef<number | null>(null)
-  const autosaveBusy = useRef(false)
-  const autosaveQueued = useRef(false)
+  const autosavePending = useRef<Promise<void> | null>(null)
+  const saveInProgressRef = useRef(false)
   const answersRef = useRef(answers)
   const preferenceRef = useRef(preference)
   const revisionRef = useRef(revision)
@@ -75,6 +75,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
         setLoadState({ kind: 'ready', screen: normalized })
         setAnswers(normalized.existingAnswers)
         setPreference(normalized.existingPreference)
+        revisionRef.current = normalized.draftRevision
         setRevision(normalized.draftRevision)
       })
       .catch((error: ApiError) => {
@@ -87,96 +88,96 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
     }
   }, [screenNumber])
 
-  const runAutosave = useCallback(async () => {
-    if (autosaveBusy.current) {
-      autosaveQueued.current = true
-      return
-    }
-    if (conflictRef.current || finalized) return
-    autosaveBusy.current = true
-    setSaveState('saving')
-    try {
-      const payloadAnswers = answersRef.current.map((a) => {
-        const partial: { label: string; groundedness?: number; coverage?: number; actionability?: number; comment?: string } = { label: a.label }
-        if (a.groundedness != null) partial.groundedness = a.groundedness
-        if (a.coverage != null) partial.coverage = a.coverage
-        if (a.actionability != null) partial.actionability = a.actionability
-        if (a.comment && a.comment.trim().length > 0) partial.comment = a.comment
-        return partial
-      })
-      const result = await autosave({
-        screenNumber,
-        expectedDraftRevision: revisionRef.current,
-        answers: payloadAnswers,
-        preferenceLabel: isFiveBrief ? preferenceRef.current : null,
-      })
-      setRevision(result.draft_revision)
-      setSaveState('saved')
-      setSaveMessage(null)
-    } catch (error) {
-      const apiError = error as ApiError
-      if (apiError.status === 409) {
-        setConflict(true)
-        setSaveState('error')
-        setSaveMessage('Your changes are out of date with the server. Automatic saving has stopped.')
-      } else if (apiError.status === 503) {
-        setSaveState('error')
-        setSaveMessage('Evaluation submissions are not yet open. Your ratings cannot be submitted at this time.')
-      } else if (apiError.status === 401) {
-        setSaveState('error')
-        setSaveMessage('Your session has expired. Please sign in again.')
-      } else {
-        setSaveState('error')
-        setSaveMessage('Automatic saving failed. Your ratings are still in the form; they will be saved with the next change or when you press Save.')
-      }
-    } finally {
-      autosaveBusy.current = false
-      if (autosaveQueued.current) {
-        autosaveQueued.current = false
-        if (!conflictRef.current) {
-          if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current)
-          autosaveTimer.current = window.setTimeout(() => void runAutosave(), AUTOSAVE_DELAY_MS)
+  const runAutosave = useCallback((): Promise<void> => {
+    if (autosavePending.current) return autosavePending.current
+    if (saveInProgressRef.current || conflictRef.current || finalized) return Promise.resolve()
+
+    const task = (async () => {
+      setSaveState('saving')
+      try {
+        const payloadAnswers = answersRef.current.map((a) => ({
+          label: a.label,
+          ...(a.groundedness != null ? { groundedness: a.groundedness } : {}),
+          ...(a.coverage != null ? { coverage: a.coverage } : {}),
+          ...(a.actionability != null ? { actionability: a.actionability } : {}),
+          ...(a.comment?.trim() ? { comment: a.comment } : {}),
+        }))
+        const result = await autosave({
+          screenNumber,
+          expectedDraftRevision: revisionRef.current,
+          answers: payloadAnswers,
+          preferenceLabel: isFiveBrief ? preferenceRef.current : null,
+        })
+        revisionRef.current = result.draft_revision
+        setRevision(result.draft_revision)
+        setSaveState('saved')
+        setSaveMessage(null)
+      } catch (error) {
+        const apiError = error as ApiError
+        if (apiError.status === 409) {
+          conflictRef.current = true
+          setConflict(true)
+          setSaveMessage('Your changes are out of date with the server. Automatic saving has stopped.')
+        } else if (apiError.status === 503) {
+          setSaveMessage('Evaluation submissions are not yet open. Your ratings cannot be submitted at this time.')
+        } else {
+          setSaveMessage('Automatic saving failed. Your unsaved changes remain on this page.')
         }
+        setSaveState('error')
       }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    })()
+
+    autosavePending.current = task
+    void task.finally(() => {
+      if (autosavePending.current === task) autosavePending.current = null
+    })
+    return task
   }, [screenNumber, isFiveBrief, finalized])
 
   function onAnswerChange(next: AnswerDraft) {
-    if (finalized || conflict) return
+    if (finalized || conflictRef.current || saveInProgressRef.current) return
     setAnswers((prev) => prev.map((a) => (a.label === next.label ? next : a)))
     setSaveState('idle')
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current)
+    if (autosaveTimer.current !== null) window.clearTimeout(autosaveTimer.current)
     autosaveTimer.current = window.setTimeout(() => void runAutosave(), AUTOSAVE_DELAY_MS)
   }
 
   function onPreferenceChange(label: string) {
-    if (finalized || conflict) return
+    if (finalized || conflictRef.current || saveInProgressRef.current) return
     setPreference(label)
     setSaveState('idle')
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current)
+    if (autosaveTimer.current !== null) window.clearTimeout(autosaveTimer.current)
     autosaveTimer.current = window.setTimeout(() => void runAutosave(), AUTOSAVE_DELAY_MS)
   }
 
   async function handleSave() {
-    if (!screen) return
+    if (!screen || saveInProgressRef.current || conflictRef.current || finalized) return
     setValidationError(null)
-    const incomplete = answers.filter((a) => a.groundedness == null || a.coverage == null || a.actionability == null)
-    if (incomplete.length > 0) {
-      setValidationError(
-        `Please provide all three ratings (groundedness, coverage, actionability) for every brief. Missing: ${incomplete
-          .map((a) => a.label)
-          .join(', ')}.`,
-      )
+    const incomplete = answers.filter((a) =>
+      a.groundedness == null || a.coverage == null || a.actionability == null
+    )
+    if (incomplete.length) {
+      setValidationError(`Please provide all three ratings for every brief. Missing: ${incomplete.map((a) => a.label).join(', ')}.`)
       return
     }
     if (isFiveBrief && !preference) {
-      setValidationError('Please select which brief you consider best before saving.')
+      setValidationError('Please select the best brief before saving.')
       return
     }
+
+    saveInProgressRef.current = true
     setSaveBusy(true)
     setSaveState('saving')
+    if (autosaveTimer.current !== null) {
+      window.clearTimeout(autosaveTimer.current)
+      autosaveTimer.current = null
+    }
+
     try {
+      // Drain an in-flight autosave before using its new revision.
+      if (autosavePending.current) await autosavePending.current
+      if (conflictRef.current) throw Object.assign(new Error('revision_conflict'), { status: 409 })
+
       const result = await saveScreen({
         screenNumber,
         expectedDraftRevision: revisionRef.current,
@@ -185,31 +186,29 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
           groundedness: a.groundedness!,
           coverage: a.coverage!,
           actionability: a.actionability!,
-          ...(a.comment && a.comment.trim().length > 0 ? { comment: a.comment } : {}),
+          ...(a.comment?.trim() ? { comment: a.comment } : {}),
         })),
         preferenceLabel: isFiveBrief ? preference : null,
       })
+      revisionRef.current = result.draft_revision
       setRevision(result.draft_revision)
       setSaveState('saved')
       setSaveMessage(null)
-      const refreshed = await refreshProgress()
-      if (refreshed.next_screen != null) {
-        setScreenNumber(refreshed.next_screen)
-      } else {
-        setLoadState({ kind: 'error', message: 'All screens are complete. Use the submission options on this page to finish the study.' })
-      }
+      // Parent decides whether to show next screen, pilot submission or main submission.
+      await refreshProgress()
     } catch (error) {
       const apiError = error as ApiError
       if (apiError.status === 409) {
+        conflictRef.current = true
         setConflict(true)
-        setSaveState('error')
-        setSaveMessage('Your changes are out of date with the server. Automatic saving has stopped.')
+        setSaveMessage('The server has newer ratings. Refresh from server to resolve the conflict.')
         setConflictDialog(true)
       } else {
-        setSaveState('error')
-        setSaveMessage(apiError.message)
+        setSaveMessage(apiError.message || 'Save failed. Your entries remain on this page.')
       }
+      setSaveState('error')
     } finally {
+      saveInProgressRef.current = false
       setSaveBusy(false)
     }
   }
@@ -229,6 +228,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
         setAnswers(normalized.existingAnswers)
         setPreference(normalized.existingPreference)
         setRevision(normalized.draftRevision)
+        conflictRef.current = false
         setConflict(false)
         setSaveState('idle')
         setSaveMessage(null)
@@ -240,7 +240,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
 
   useEffect(() => {
     return () => {
-      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current)
+      if (autosaveTimer.current !== null) window.clearTimeout(autosaveTimer.current)
     }
   }, [])
 
@@ -299,7 +299,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
           key={brief.label}
           brief={brief}
           answer={answers.find((a) => a.label === brief.label) ?? { label: brief.label, groundedness: null, coverage: null, actionability: null, comment: null }}
-          disabled={finalized || conflict}
+          disabled={finalized || conflict || saveBusy}
           onChange={onAnswerChange}
         />
       ))}
@@ -349,7 +349,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
                   ? 'Finalized.'
                   : 'Ratings save automatically as you work.'}
         </p>
-        <Button onClick={handleSave} loading={saveBusy} disabled={finalized || conflict}>
+        <Button onClick={handleSave} loading={saveBusy} disabled={finalized || conflict || saveBusy}>
           Save and continue
         </Button>
       </div>
