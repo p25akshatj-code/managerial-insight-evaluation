@@ -1,3 +1,4 @@
+
 export type Role = 'rater' | 'researcher'
 
 export interface ScreenRecord {
@@ -15,7 +16,13 @@ export interface Progress {
   total_screens: number | null
   pilot_approved: boolean | null
   unsaved_screen: number | null
-  completed_screens: number[] | null
+  completed_screens: number | null
+}
+
+export interface SourceReview {
+  position: number
+  rating: number | null
+  text: string
 }
 
 export interface Brief {
@@ -56,6 +63,7 @@ export interface ScreenData {
   status: string | null
   finalized: boolean
   draftRevision: number
+  reviews: SourceReview[]
   briefs: Brief[]
   existingAnswers: AnswerDraft[]
   existingPreference: string | null
