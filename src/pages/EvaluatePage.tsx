@@ -70,66 +70,38 @@ export default function EvaluatePage() {
 
   
 function decideView(p: ProgressResult): View {
-  const completed = getCompletedScreenNumbers(p)
-
-  const pilotDone = PILOT_SCREENS.every(
-    (n) => completed.includes(n)
-  )
-
-  if (!pilotDone) {
-    const nextPilot = PILOT_SCREENS.find(
-      (n) => !completed.includes(n)
+    const completed = getCompletedScreenNumbers(p)
+    const pilotDone = PILOT_SCREENS.every((n) => completed.includes(n))
+    const pilotFinalized = PILOT_SCREENS.every((n) =>
+      p.screens.some((s) => s.screen_number === n && s.status === 'finalized')
     )
 
-    if (nextPilot == null) {
-      return { kind: 'submitPilot' }
+    if (!pilotDone) {
+      const nextPilot = PILOT_SCREENS.find((n) => !completed.includes(n))
+      if (nextPilot == null) return { kind: 'error', message: 'Pilot progress is inconsistent. Refresh the page.' }
+      return consentAcknowledged
+        ? { kind: 'working', screenNumber: nextPilot }
+        : { kind: 'instructions' }
     }
 
-    return consentAcknowledged
-      ? {
-          kind: 'working',
-          screenNumber: nextPilot,
-        }
-      : { kind: 'instructions' }
-  }
+    // Saving screen 3 does not submit/finalize the pilot.
+    if (!pilotFinalized) return { kind: 'submitPilot' }
+    if (p.pilot_approved !== true) return { kind: 'awaitingApproval' }
 
-  if (p.pilot_approved === false) {
-    return { kind: 'awaitingApproval' }
-  }
-
-  const total = p.total_screens
-
-  const mainScreens = total
-    ? Array.from(
-        { length: total },
-        (_, i) => i + 1
-      ).filter(
-        (n) => !PILOT_SCREENS.includes(n)
-      )
-    : []
-
-  const remainingMain = mainScreens.filter(
-    (n) => !completed.includes(n)
-  )
-
-  if (remainingMain.length === 0) {
-    return { kind: 'submitMain' }
-  }
-
-  if (p.next_screen != null) {
-    return {
-      kind: 'working',
-      screenNumber: p.next_screen,
+    const mainScreens = p.screens.filter((s) => s.screen_number > 3)
+    if (mainScreens.length === 0) {
+      return { kind: 'error', message: 'Main evaluation schedule is unavailable.' }
     }
+    if (mainScreens.every((s) => s.status === 'finalized')) return { kind: 'complete' }
+    if (mainScreens.every((s) => s.status === 'completed' || s.status === 'finalized')) {
+      return { kind: 'submitMain' }
+    }
+    const next = p.next_screen
+    if (next != null && next > 3 && p.screens.some((s) => s.screen_number === next && s.accessible === true)) {
+      return { kind: 'working', screenNumber: next }
+    }
+    return { kind: 'error', message: 'Progress could not determine an accessible next screen. Please reload.' }
   }
-
-  return {
-    kind: 'error',
-    message:
-      'Progress could not determine the next screen. Please reload the page.',
-  }
-}
-
 
   async function handleStageSubmit(stage: 'pilot' | 'main') {
     setStageBusy(true)
@@ -209,7 +181,7 @@ const pilotDone = PILOT_SCREENS.every(
               </p>
               <p>
                 Your ratings are saved automatically as you work, but you must press <strong>Save and continue</strong>{' '}
-                at the end of each screen to record them and move on. Once a screen is saved and finalized it can no
+                at the end of each screen to record them and move on. Saving a screen completes it; submitting the stage finalizes it. Finalized screens can no
                 longer be edited.
               </p>
               <p>
@@ -336,7 +308,7 @@ const pilotDone = PILOT_SCREENS.every(
               Progress: {completedCount} of {totalScreens} screens
               {!pilotDone && ' (pilot round)'}
             </span>
-            {progress?.pilot_approved === false && pilotDone && <span>Pilot under review</span>}
+            {progress?.pilot_approved === false && pilotDone && PILOT_SCREENS.every((n) => progress.screens.some((s) => s.screen_number === n && s.status === 'finalized')) && <span>Pilot under review</span>}
           </div>
           <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-200">
             <div
