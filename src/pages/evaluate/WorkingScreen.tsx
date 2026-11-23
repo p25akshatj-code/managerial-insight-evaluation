@@ -7,6 +7,7 @@ import { normalizeScreen } from './normalize'
 import { Button } from '../../components/ui/Button'
 import { Notice } from '../../components/ui/Notice'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
+import { SourceReviews } from './SourceReviews'
 
 interface WorkingScreenProps {
   initialScreenNumber: number
@@ -274,6 +275,7 @@ export function WorkingScreen({ initialScreenNumber, refreshProgress }: WorkingS
 
   return (
     <div className="space-y-6">
+      <SourceReviews reviews={current.reviews} />
       {conflict && (
         <Notice kind="error">
           Your ratings on this screen are out of date with the server. Automatic saving has stopped to avoid overwriting
