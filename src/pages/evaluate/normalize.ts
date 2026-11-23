@@ -3,225 +3,188 @@ import type {
   AnswerDraft,
   Brief,
   ScreenData,
+  SourceReview,
 } from '../../types'
 
-function asRecord(
-  value: unknown
-): Record<string, unknown> | null {
-  return (
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null &&
     typeof value === 'object' &&
-    value !== null &&
     !Array.isArray(value)
-  )
     ? value as Record<string, unknown>
     : null
 }
 
-function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0
+function str(value: unknown): string | null {
+  return typeof value === 'string' && value.trim()
     ? value
     : null
 }
 
-function asInt(value: unknown): number | null {
-  return typeof value === 'number' && Number.isInteger(value)
+function int(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isInteger(value)
     ? value
     : null
 }
 
-function readThemes(value: unknown): string {
-  if (!Array.isArray(value)) return ''
-
+function readBriefBody(entry: Record<string, unknown>): string | null {
   const sections: string[] = []
 
-  for (const item of value) {
-    const theme = asRecord(item)
-    if (!theme) continue
-
-    const title =
-      asString(theme.theme) ??
-      asString(theme.title) ??
-      asString(theme.name)
-
-    const description =
-      asString(theme.description) ??
-      asString(theme.text) ??
-      asString(theme.content)
-
-    if (title && description) {
-      sections.push(`${title}\n${description}`)
-    } else if (title) {
-      sections.push(title)
-    } else if (description) {
-      sections.push(description)
-    }
-  }
-
-  return sections.join('\n\n')
-}
-
-function readBriefBody(
-  entry: Record<string, unknown>
-): string | null {
-  const directBody =
-    asString(entry.body) ??
-    asString(entry.text) ??
-    asString(entry.content) ??
-    asString(entry.brief) ??
-    asString(entry.markdown)
-
-  if (directBody) return directBody
-
-  const summary = asString(entry.summary)
-  const themes = readThemes(entry.dominant_themes)
-
-  if (!summary && !themes) return null
-
-  const sections: string[] = []
-
+  const summary = str(entry.summary)
   if (summary) {
     sections.push(`SUMMARY\n${summary}`)
   }
 
-  if (themes) {
-    sections.push(`DOMINANT THEMES\n${themes}`)
+  if (Array.isArray(entry.dominant_themes)) {
+    const themes = entry.dominant_themes.map((value) => {
+      const item = record(value)
+      if (!item) return ''
+      const title = str(item.theme) ?? ''
+      const description = str(item.description) ?? ''
+      return [title, description].filter(Boolean).join('\n')
+    }).filter(Boolean)
+
+    if (themes.length) {
+      sections.push(`DOMINANT THEMES\n${themes.join('\n\n')}`)
+    }
   }
 
-  return sections.join('\n\n')
+  if (Array.isArray(entry.dissatisfaction_drivers)) {
+    const drivers = entry.dissatisfaction_drivers
+      .map((value) => str(value))
+      .filter((value): value is string => value !== null)
+
+    if (drivers.length) {
+      sections.push(
+        `DISSATISFACTION DRIVERS\n${drivers
+          .map((value, i) => `${i + 1}. ${value}`)
+          .join('\n\n')}`
+      )
+    }
+  }
+
+  if (Array.isArray(entry.recommendations)) {
+    const recommendations = entry.recommendations
+      .map((value) => {
+        const item = record(value)
+        if (!item) return ''
+
+        const priority = int(item.priority)
+        const recommendation = str(item.recommendation)
+        const rationale = str(item.rationale)
+
+        return [
+          priority !== null ? `Priority ${priority}` : '',
+          recommendation ?? '',
+          rationale ? `Rationale: ${rationale}` : '',
+        ].filter(Boolean).join('\n')
+      })
+      .filter(Boolean)
+
+    if (recommendations.length) {
+      sections.push(
+        `RECOMMENDATIONS\n${recommendations.join('\n\n')}`
+      )
+    }
+  }
+
+  if (sections.length) return sections.join('\n\n')
+
+  return str(entry.body) ??
+    str(entry.text) ??
+    str(entry.content) ??
+    str(entry.brief) ??
+    str(entry.markdown)
 }
 
-/**
- * Converts the actual Supabase evaluation-screen response
- * into the existing frontend ScreenData structure.
- *
- * Preserves frozen brief order, anonymous labels,
- * summary content, dominant themes, and saved scores.
- *
- * Returns null when the response cannot be interpreted.
- */
 export function normalizeScreen(
   screenNumber: number,
   raw: Record<string, unknown>
 ): ScreenData | null {
-  const pilotFlag = raw.is_pilot ?? raw.isPilot
+  const source = record(raw.screen) ?? raw
 
-  const isPilot =
-    typeof pilotFlag === 'boolean'
-      ? pilotFlag
-      : screenNumber <= 3
-
-  const status = asString(raw.status)
-
-  // A completed screen is explicitly saved but is not
-  // necessarily finalized until stage submission.
-  const finalized =
-    status === 'finalized' ||
-    status === 'submitted' ||
-    raw.finalized === true
-
-  const revisionRaw =
-    raw.draft_revision ??
-    raw.draftRevision ??
-    raw.expected_draft_revision
-
-  const draftRevision = asInt(revisionRaw) ?? 0
-
-  let briefsRaw: unknown[] | null = null
-
-  for (const key of [
-    'briefs',
-    'items',
-    'variants',
-    'contents',
-  ]) {
-    const value = raw[key]
-
-    if (Array.isArray(value) && value.length > 0) {
-      briefsRaw = value
-      break
-    }
+  const briefsRaw = source.briefs
+  if (!Array.isArray(briefsRaw) || briefsRaw.length === 0) {
+    return null
   }
 
-  if (
-    !briefsRaw &&
-    Array.isArray(raw.screen) &&
-    raw.screen.length > 0
-  ) {
-    briefsRaw = raw.screen
+  const reviewsRaw = source.reviews
+  if (!Array.isArray(reviewsRaw) || reviewsRaw.length === 0) {
+    return null
   }
 
-  if (!briefsRaw) return null
+  const reviews: SourceReview[] = []
 
+  for (const value of reviewsRaw) {
+    const item = record(value)
+    if (!item) return null
+
+    const position = int(item.position)
+    const text = str(item.text)
+
+    if (position === null || text === null) return null
+
+    reviews.push({
+      position,
+      rating: int(item.rating),
+      text,
+    })
+  }
+
+  // Preserve the order returned by the frozen backend.
   const briefs: Brief[] = []
   const existingAnswers: AnswerDraft[] = []
 
-  for (let i = 0; i < briefsRaw.length; i++) {
-    const entry = asRecord(briefsRaw[i])
-
+  for (const value of briefsRaw) {
+    const entry = record(value)
     if (!entry) return null
 
-    const label =
-      asString(entry.label) ??
-      asString(entry.variant_label) ??
-      asString(entry.short_label)
-
-    // Do not invent anonymous labels.
-    if (!label) return null
-
-    const title =
-      asString(entry.title) ??
-      asString(entry.heading) ??
-      asString(entry.subject)
-
+    const label = str(entry.label)
     const body = readBriefBody(entry)
 
-    if (!body) return null
+    if (!label || !body) return null
 
     briefs.push({
       label,
-      title,
+      title: str(entry.title),
       body,
     })
 
-    // Actual backend uses "scores".
-    const ratings =
-      asRecord(entry.scores) ??
-      asRecord(entry.ratings) ??
-      asRecord(entry.answer) ??
-      asRecord(entry.evaluation)
-
-    const source: Record<string, unknown> =
-      ratings ?? entry
+    const scores =
+      record(entry.scores) ??
+      record(entry.ratings) ??
+      record(entry.answer) ??
+      entry
 
     existingAnswers.push({
       label,
-      groundedness: asInt(source.groundedness),
-      coverage: asInt(source.coverage),
-      actionability: asInt(source.actionability),
-      comment: asString(source.comment),
+      groundedness: int(scores.groundedness),
+      coverage: int(scores.coverage),
+      actionability: int(scores.actionability),
+      comment: str(scores.comment),
     })
   }
 
-  // Preserve the backend's frozen display order.
-  // Do not sort briefs by label or model identity.
+  const status = str(source.status)
 
-  let existingPreference: string | null = null
+  const pilotFlag = source.is_pilot ?? source.isPilot
+  const isPilot = typeof pilotFlag === 'boolean'
+    ? pilotFlag
+    : screenNumber <= 3
 
-  const prefRaw =
-    raw.preference_label ??
-    raw.preference ??
-    raw.best_brief
+  const finalized =
+    status === 'finalized' ||
+    status === 'submitted' ||
+    source.editable === false ||
+    source.finalized === true
 
-  if (typeof prefRaw === 'string') {
-    existingPreference = prefRaw
-  } else {
-    const preferenceRecord = asRecord(prefRaw)
+  const draftRevision =
+    int(source.draft_revision ?? source.draftRevision) ?? 0
 
-    if (preferenceRecord) {
-      existingPreference =
-        asString(preferenceRecord.label)
-    }
-  }
+  const preference =
+    str(source.selected_preference) ??
+    str(source.preference_label) ??
+    str(source.preference)
 
   return {
     screenNumber,
@@ -229,8 +192,9 @@ export function normalizeScreen(
     status,
     finalized,
     draftRevision,
+    reviews,
     briefs,
     existingAnswers,
-    existingPreference,
+    existingPreference: preference,
   }
 }
