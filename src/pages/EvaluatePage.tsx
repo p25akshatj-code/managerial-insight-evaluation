@@ -96,11 +96,30 @@ function decideView(p: ProgressResult): View {
     if (mainScreens.every((s) => s.status === 'completed' || s.status === 'finalized')) {
       return { kind: 'submitMain' }
     }
-    const next = p.next_screen
-    if (next != null && next > 3 && p.screens.some((s) => s.screen_number === next && s.accessible === true)) {
-      return { kind: 'working', screenNumber: next }
+    // The API may report next_screen=null while an unfinished draft is
+    // accessible (for example screen 29 with unsaved changes).
+    // Prefer the explicit unsaved screen, then next_screen, then any
+    // accessible unfinished screen. Never reopen a completed screen.
+    const candidates = [p.unsaved_screen, p.next_screen]
+    for (const number of candidates) {
+      if (number != null && number > 3 && p.screens.some(
+        (s) => s.screen_number === number &&
+          s.accessible === true &&
+          s.status !== 'completed' &&
+          s.status !== 'finalized'
+      )) {
+        return { kind: 'working', screenNumber: number }
+      }
     }
-    return { kind: 'error', message: 'Progress could not determine an accessible next screen. Please reload.' }
+    const accessibleUnfinished = mainScreens.find(
+      (s) => s.accessible === true &&
+        s.status !== 'completed' &&
+        s.status !== 'finalized'
+    )
+    if (accessibleUnfinished) {
+      return { kind: 'working', screenNumber: accessibleUnfinished.screen_number }
+    }
+    return { kind: 'error', message: 'No unfinished screen is currently accessible. Please contact the research team; your saved responses have not been deleted.' }
   }
 
   async function handleStageSubmit(stage: 'pilot' | 'main') {
